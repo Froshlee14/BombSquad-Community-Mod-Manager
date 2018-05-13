@@ -1,0 +1,280 @@
+#made by Froshlee14
+import bs
+import random
+import bsPowerup
+import bsUtils
+import bsBomb
+import bsSpaz
+from bsSpaz import _PunchHitMessage
+
+class PlayerSpaz_TheBoxSays(bs.PlayerSpaz):
+    def handleMessage(self,m):
+        if isinstance(m,bs.PowerupMessage):
+            if self._dead: return True
+            if self.pickUpPowerupCallback is not None:
+                self.pickUpPowerupCallback(self)
+            if (m.powerupType == bs.getActivity()._chosenPowerup):
+                #print('Good job!')
+                bs.getActivity().playerScores(self.node)
+                bs.getActivity().changeChosenPowerup()
+            else:
+                #bs.playSound(bs.getActivity()._unscoreSound)
+                bs.Blast(position = self.node.position,blastRadius = 0.5)
+            self.node.handleMessage("flash")
+            if m.sourceNode.exists():
+                m.sourceNode.handleMessage(bs.PowerupAcceptMessage())
+            return True
+        else: super(self.__class__, self).handleMessage(m)
+		
+class Box(bs.Actor):
+    def __init__(self,position=(0,0,0)):
+        bs.Actor.__init__(self)
+        self.node = bs.newNode('prop',
+                               delegate=self,
+                               attrs={'position':(position[0],position[1]+1,position[2]),
+                                      'velocity':(0,0,0),
+                                      'model':bs.getModel('powerup'),
+									  'gravityScale':5,
+                                      'modelScale':1.5,
+                                      'bodyScale':1.25,
+                                      'shadowSize':0.5,
+                                      'body':'crate',								  
+                                      'colorTexture':bs.getTexture('powerupHealth'),
+                                      'materials':[bs.getSharedObject('footingMaterial')]})
+        self.setText()
+						
+    def setText(self):
+        m = bs.newNode('math', owner=self.node, attrs={'input1': (0, 0.7, 0), 'operation': 'add'})
+        self.node.connectAttr('position', m, 'input2')
+        self._bunnyText = bs.newNode('text',
+                                      owner=self.node,
+                                      attrs={'text':'THE BOX',
+                                             'inWorld':True,
+                                             'shadow':1.0,
+                                             'flatness':1.0,
+                                             'color':(1,1,1),
+                                             'scale':0.0,
+                                             'hAlign':'center'})
+        m.connectAttr('output', self._bunnyText, 'position')
+        bs.animate(self._bunnyText, 'scale', {0: 0.0, 500: 0.01})
+
+class NewBotSet(bsSpaz.BotSet):
+    def _update(self):
+        try:
+            botList = self._botLists[self._botUpdateList] = [b for b in self._botLists[self._botUpdateList] if b.exists()]
+        except Exception:
+            bs.printException("error updating bot list: "+str(self._botLists[self._botUpdateList]))
+        self._botUpdateList = (self._botUpdateList+1)%self._botListCount
+        playerPts = []
+        for n in bs.getNodes():
+                if n.getNodeType() == 'prop':
+                    s = n.getDelegate()
+                    if isinstance(s,bsPowerup.Powerup):
+                        playerPts.append((bs.Vector(*n.position), bs.Vector(*n.position)))
+
+        for b in botList:
+            b._setPlayerPts(playerPts)
+            b._updateAI()
+
+class AntiPowerupBot(bsSpaz.ToughGuyBot):
+    character = 'Bones'
+    color = (0,0,1)
+    run = True
+    def handleMessage(self,m):
+        if isinstance(m, _PunchHitMessage):
+            node = bs.getCollisionInfo("opposingNode")
+            if node.getNodeType() == 'prop':
+                s = node.getDelegate()
+                if isinstance(s,bsPowerup.Powerup):
+                    node.handleMessage(bs.DieMessage()) 
+
+        else: super(self.__class__, self).handleMessage(m)
+
+#############################################################
+
+def bsGetAPIVersion():
+    return 4
+
+def bsGetGames():
+    return [TheBoxSays]
+
+class TheBoxSays(bs.TeamGameActivity):
+
+    @classmethod
+    def getName(cls):
+        return 'The box says'
+    
+    @classmethod
+    def getDescription(cls,sessionType):
+        return 'Catch the powerup sayed by the box!'
+
+    # we're currently hard-coded for one map..
+    @classmethod
+    def getSupportedMaps(cls,sessionType):
+        return ['Doom Shroom','Courtyard','Football Stadium','Hockey Stadium']
+
+    @classmethod
+    def getSettings(cls,sessionType):
+        settings = [("Epic Mode",{'default':False}),("Spawn powerup killer",{'default':True}),
+                       ("Score to Win Per Player",{'minValue':5,'default':10,'increment':1})]
+        if issubclass(sessionType, bs.FreeForAllSession):
+            settings.append(("Allow Negative Scores",{'default':True}))
+        return settings
+    
+    # we support teams, free-for-all, and co-op sessions
+    @classmethod
+    def supportsSessionType(cls,sessionType):
+        return True if (issubclass(sessionType,bs.TeamsSession)
+                        or issubclass(sessionType,bs.FreeForAllSession)
+                        or issubclass(sessionType,bs.CoopSession)) else False
+
+    def __init__(self,settings):
+        bs.TeamGameActivity.__init__(self,settings)
+        if self.settings['Epic Mode']: self._isSlowMotion = True
+        self.announcePlayerDeaths = True
+        self._prevChosenPowerup = 'health'
+        self._scoreBoard = bs.ScoreBoard()
+        self._chosenPowerup = 'health'
+        self._powerupCenter = (0,0,0)
+        self._powerupSpread = (3,3)
+        
+    def onTransitionIn(self):
+        bs.TeamGameActivity.onTransitionIn(self, music='ForwardMarch')
+
+    def onBegin(self):
+        bs.TeamGameActivity.onBegin(self)
+        self._scoreToWin = self.settings['Score to Win Per Player']
+        self._startPowerupDrops()
+        self._updateScoreBoard()
+		
+        self._scoreSound = bs.getSound('dingSmall')
+        self._unscoreSound = bs.getSound('error')
+        self._cheerSound = bs.getSound("cheer")
+		
+        self._b = Box(position=self.getMap().defs.points['flagDefault'])
+        self._powerupCenter = self.getMap().defs.points['flagDefault']
+
+        self._bots = NewBotSet()
+        if self.settings['Spawn powerup killer']:
+            pos = self.getMap().defs.points['flagDefault']
+            bs.gameTimer(0,bs.Call(self._bots.spawnBot,AntiPowerupBot,pos=pos,spawnTime=5000))
+		
+        map = self.getMap().getName()
+        if map == 'Courtyard': self._powerupSpread = (4,4)
+        elif map == 'Doom Shroom': self._powerupSpread = (7,5)
+        elif map == 'Football Stadium' or map =='Hockey Stadium': self._powerupSpread = (12,4)
+		
+    def changeChosenPowerup(self):
+        self._chosenPowerup = self.getPowType()
+        while self._prevChosenPowerup == self._chosenPowerup: self._chosenPowerup = self.getPowType()
+        self._prevChosenPowerup = self._chosenPowerup
+        self._b.node.colorTexture = self.getTextureByPowerup(self._chosenPowerup)
+        bs.emitBGDynamics(position=self._b.node.position,count=50,scale=1.0,spread=1.5,chunkType='spark')
+		
+    def getTextureByPowerup(self,powerup):
+        b = bs.Powerup(position=(0,0,0),powerupType=powerup).autoRetain()
+        tex = b.node.colorTexture
+        b.node.delete()
+        return tex
+		
+    def onTeamJoin(self,team):
+        team.gameData['score'] = 0
+        if self.hasBegun(): self._updateScoreBoard()
+       
+    def spawnPlayer(self, player):
+        if isinstance(self.getSession(), bs.TeamsSession):
+            position = self.getMap().getStartPosition(player.getTeam().getID())
+        else:
+            position = self.getMap().getFFAStartPosition(self.players)
+        angle = None
+        name = player.getName()
+        lightColor = bsUtils.getNormalizedColor(player.color)
+        displayColor = bs.getSafeColor(player.color, targetIntensity=0.75)
+
+        spaz = PlayerSpaz_TheBoxSays(color=player.color,
+                             highlight=player.highlight,
+                             character=player.character,
+                             player=player)
+        player.setActor(spaz)
+
+        if isinstance(self.getSession(), bs.CoopSession) and self.getMap().getName() in ['Courtyard', 'Tower D']:
+            mat = self.getMap().preloadData['collideWithWallMaterial']
+            spaz.node.materials += (mat,)
+            spaz.node.rollerMaterials += (mat,)
+
+        spaz.node.name = name
+        spaz.node.nameColor = displayColor
+        spaz.connectControlsToPlayer(enableBomb=False)
+        self.scoreSet.playerGotNewSpaz(player, spaz)
+
+        spaz.handleMessage(bs.StandMessage(position, angle if angle is not None else random.uniform(0, 360)))
+        t = bs.getGameTime()
+        bs.playSound(self._spawnSound, 1, position=spaz.node.position)
+        light = bs.newNode('light', attrs={'color':lightColor})
+        spaz.node.connectAttr('position', light, 'position')
+        bsUtils.animate(light, 'intensity', {0:0, 250:1, 500:0})
+        bs.gameTimer(500, light.delete)
+
+    def handleMessage(self,m):
+        if isinstance(m,bs.PlayerSpazDeathMessage):
+            bs.TeamGameActivity.handleMessage(self,m)
+            player = m.spaz.getPlayer()
+            if self.settings['Allow Negative Scores']: player.getTeam().gameData['score'] = max(0,player.getTeam().gameData['score']-1)
+            self.respawnPlayer(player)
+        elif isinstance(m,bs.SpazBotDeathMessage):
+            self._onSpazBotDied(m)
+            bs.TeamGameActivity.handleMessage(self,m)
+        else:
+            bs.TeamGameActivity.handleMessage(self,m)
+
+    def _onSpazBotDied(self,DeathMsg):
+        pos = self.getMap().defs.points['flagDefault']
+        bs.gameTimer(0,bs.Call(self._bots.spawnBot,AntiPowerupBot,pos=pos,spawnTime=3000))
+			
+    def playerScores(self,p):
+        try: player = p.getDelegate().getPlayer()
+        except Exception: player = None
+        if player.exists():
+            if player.isAlive():       
+                player.getTeam().gameData['score'] = max(0,player.getTeam().gameData['score']+1)
+                bs.playSound(self._scoreSound)
+                self._updateScoreBoard()
+
+                if any(team.gameData['score'] >= self._scoreToWin for team in self.teams):
+                    bs.playSound(self._cheerSound)
+                    bs.gameTimer(500,self.endGame)       
+
+    def _updateScoreBoard(self):
+        for team in self.teams:
+            self._scoreBoard.setTeamValue(team,team.gameData['score'],self._scoreToWin)		  
+
+    def endGame(self):
+        results = bs.TeamGameResults()
+        for t in self.teams: results.setTeamScore(t,t.gameData['score'])
+        self.end(results=results)
+		
+    def _startPowerupDrops(self):
+        map = self.getMap().getName()
+        self._powerupDropTimer = bs.Timer(300 if map=='Football Stadium' or map=='Hockey Stadium' else 800,bs.WeakCall(self._dropPowerups),repeat=True)
+		
+    def _dropPowerups(self,standardPoints=False,powerupType=None):
+        pt = (self._powerupCenter[0]+random.uniform(-1.0*self._powerupSpread[0],1.0*self._powerupSpread[0]),
+                  self._powerupCenter[1]+1,self._powerupCenter[2]+random.uniform(-self._powerupSpread[1],self._powerupSpread[1]))
+        self._flashMine(pt)
+        bs.gameTimer(950,bs.Call(self._makeP,pt))
+    
+    def _makeP(self,pt):
+        bs.Powerup(position=pt,powerupType=self.getPowType()).autoRetain()        
+
+    def _flashMine(self,pos):
+        light = bs.newNode("light",
+                           attrs={'position':pos,
+                                  'color':(1,0.2,0.2),
+                                  'radius':0.1,
+                                  'heightAttenuated':False})
+        bs.animate(light,"intensity",{0:0,100:1.0,200:0},loop=True)
+        bs.gameTimer(1000,light.delete)
+			
+    def getPowType(self):
+        powerups = ['tripleBombs','punch','iceBombs','impactBombs','landMines','stickyBombs','shield','health','curse']
+        return random.choice(powerups)
